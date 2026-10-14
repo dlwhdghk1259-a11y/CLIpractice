@@ -1,17 +1,701 @@
 ---
 
 ---
-
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap"
+			rel="stylesheet"
+		/>
 		<title>Mona Mayhem</title>
 	</head>
 	<body>
-		<h1>Mona Mayhem</h1>
-		<p>Welcome to Mona Mayhem! Time to build a GitHub Contribution Battle Arena.</p>
+		<main class="battle-page">
+			<header class="hero">
+				<p class="eyebrow">GitHub Contribution Battle Arena</p>
+				<h1>Mona Mayhem</h1>
+				<p>Choose two GitHub users and compare their contribution power.</p>
+			</header>
+
+			<form id="battle-form" class="battle-form" aria-describedby="status" aria-busy="false">
+				<div class="player-input">
+					<label for="player-one">Player 1</label>
+					<input
+						id="player-one"
+						name="player-one"
+						type="text"
+						autocomplete="off"
+						placeholder="octocat"
+						aria-required="true"
+						aria-describedby="player-one-error"
+					/>
+					<p id="player-one-error" class="input-error" aria-live="polite"></p>
+				</div>
+				<div class="versus" aria-hidden="true">VS</div>
+				<div class="player-input">
+					<label for="player-two">Player 2</label>
+					<input
+						id="player-two"
+						name="player-two"
+						type="text"
+						autocomplete="off"
+						placeholder="torvalds"
+						aria-required="true"
+						aria-describedby="player-two-error"
+					/>
+					<p id="player-two-error" class="input-error" aria-live="polite"></p>
+				</div>
+				<button type="submit">Battle</button>
+			</form>
+
+			<p id="status" class="status" role="status" aria-live="polite" aria-atomic="true"></p>
+			<section
+				id="results"
+				class="results"
+				role="region"
+				aria-label="Battle results"
+				aria-live="polite"
+				aria-atomic="true"
+				tabindex="-1"
+			></section>
+		</main>
+
+		<script>
+			interface ContributionDay {
+				count: number;
+				level: number;
+				weekday: number;
+			}
+
+			interface ContributionWeek {
+				contribution_days: ContributionDay[];
+				first_day: string;
+				index: number;
+			}
+
+			interface ContributionData {
+				colors_full?: string[];
+				from?: string;
+				to?: string;
+				total_contributions?: number;
+				weeks?: ContributionWeek[];
+			}
+
+			const form = document.querySelector<HTMLFormElement>('#battle-form');
+			const playerOneInput = document.querySelector<HTMLInputElement>('#player-one');
+			const playerTwoInput = document.querySelector<HTMLInputElement>('#player-two');
+			const status = document.querySelector<HTMLElement>('#status');
+			const results = document.querySelector<HTMLElement>('#results');
+
+			if (!form || !playerOneInput || !playerTwoInput || !status || !results) {
+				throw new Error('Battle page controls are missing.');
+			}
+
+			function setStatus(message: string, type: 'error' | 'loading' | 'idle' = 'idle') {
+				status.textContent = message;
+				status.className = type === 'idle' ? 'status' : `status ${type}`;
+				status.setAttribute('role', type === 'error' ? 'alert' : 'status');
+				status.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
+			}
+
+			const usernamePattern = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
+
+			function setInputError(input: HTMLInputElement, message = '') {
+				const field = input.closest('.player-input');
+				const error = field?.querySelector<HTMLElement>('.input-error');
+				field?.classList.toggle('has-error', Boolean(message));
+				input.setAttribute('aria-invalid', String(Boolean(message)));
+				if (error) error.textContent = message;
+			}
+
+			function validateUsername(input: HTMLInputElement, label: string) {
+				const username = input.value.trim();
+				const message = !username
+					? `${label} needs a GitHub username.`
+					: !usernamePattern.test(username)
+						? `${label} must use 1–39 letters, numbers, or hyphens.`
+						: '';
+				setInputError(input, message);
+				return message;
+			}
+
+			function createContributionGrid(data: ContributionData) {
+				const grid = document.createElement('div');
+				grid.className = 'contribution-grid';
+				grid.setAttribute('aria-label', 'Contribution activity by day');
+
+				for (const week of data.weeks ?? []) {
+					const weekColumn = document.createElement('div');
+					weekColumn.className = 'week';
+
+					for (const day of week.contribution_days) {
+						const square = document.createElement('span');
+						square.className = 'day';
+						square.style.backgroundColor =
+							data.colors_full?.[day.level] ?? data.colors_full?.[0] ?? '#253047';
+						square.title = `${day.count} contribution${day.count === 1 ? '' : 's'}`;
+						square.setAttribute('aria-label', square.title);
+						weekColumn.append(square);
+					}
+
+					grid.append(weekColumn);
+				}
+
+				return grid;
+			}
+
+			function createPlayerCard(username: string, data: ContributionData) {
+				const card = document.createElement('article');
+				card.className = 'player-card';
+
+				const heading = document.createElement('h2');
+				heading.textContent = username;
+
+				const summary = document.createElement('p');
+				summary.className = 'summary';
+				summary.textContent = `${data.total_contributions ?? 0} contributions`;
+
+				const dateRange = document.createElement('p');
+				dateRange.className = 'date-range';
+				dateRange.textContent = data.from && data.to ? `${data.from} to ${data.to}` : 'Contribution history';
+
+				card.append(heading, summary, dateRange, createContributionGrid(data));
+				return card;
+			}
+
+			async function fetchContributions(username: string): Promise<ContributionData> {
+				const response = await fetch(`/api/contributions/${encodeURIComponent(username)}`);
+				const data = (await response.json()) as ContributionData & { error?: string };
+
+				if (!response.ok) {
+					throw new Error(data.error ?? 'Unable to load contribution data.');
+				}
+
+				return data;
+			}
+
+			form.addEventListener('submit', async (event) => {
+				event.preventDefault();
+				const playerOne = playerOneInput.value.trim();
+				const playerTwo = playerTwoInput.value.trim();
+				const playerOneError = validateUsername(playerOneInput, 'Player 1');
+				const playerTwoError = validateUsername(playerTwoInput, 'Player 2');
+
+				if (playerOneError || playerTwoError) {
+					setStatus(
+						playerOneError && playerTwoError
+							? 'CHECK INPUTS: both players need valid GitHub usernames.'
+							: `CHECK INPUTS: ${playerOneError ?? playerTwoError}`,
+						'error',
+					);
+					(playerOneError ? playerOneInput : playerTwoInput).focus();
+					return;
+				}
+
+				setStatus('Loading contribution data...', 'loading');
+				form.setAttribute('aria-busy', 'true');
+				results.replaceChildren();
+
+				try {
+					const [playerOneData, playerTwoData] = await Promise.all([
+						fetchContributions(playerOne),
+						fetchContributions(playerTwo),
+					]);
+
+					const comparison = document.createElement('div');
+					comparison.className = 'comparison';
+					const versusBadge = document.createElement('div');
+					versusBadge.className = 'result-versus';
+					versusBadge.textContent = 'VS';
+					versusBadge.setAttribute('aria-hidden', 'true');
+					comparison.append(
+						createPlayerCard(playerOne, playerOneData),
+						versusBadge,
+						createPlayerCard(playerTwo, playerTwoData),
+					);
+					results.replaceChildren(comparison);
+					setStatus('Battle ready.', 'idle');
+					results.focus();
+				} catch (error) {
+					setStatus(
+						error instanceof Error ? error.message : 'Unable to load contribution data.',
+						'error',
+					);
+				} finally {
+					form.setAttribute('aria-busy', 'false');
+				}
+			});
+
+			playerOneInput.addEventListener('input', () => validateUsername(playerOneInput, 'Player 1'));
+			playerTwoInput.addEventListener('input', () => validateUsername(playerTwoInput, 'Player 2'));
+		</script>
 	</body>
 </html>
+
+<style>
+	:global(:root) {
+		--arcade-bg: #0a0a1a;
+		--arcade-panel: rgba(17, 23, 42, 0.9);
+		--arcade-green: #5fed83;
+		--arcade-purple: #8a2be2;
+		--arcade-blue: #6d8cff;
+		--arcade-text: #f4f7ff;
+		--arcade-muted: #b6bfd5;
+		--arcade-border: rgba(138, 43, 226, 0.45);
+		--arcade-mono: 'Press Start 2P', system-ui, monospace;
+	}
+
+	:global(*) {
+		box-sizing: border-box;
+	}
+
+	:global(body) {
+		position: relative;
+		isolation: isolate;
+		min-height: 100vh;
+		margin: 0;
+		overflow-x: hidden;
+		background:
+			radial-gradient(circle at 15% 15%, rgba(138, 43, 226, 0.16), transparent 28rem),
+			radial-gradient(circle at 85% 80%, rgba(95, 237, 131, 0.1), transparent 24rem),
+			var(--arcade-bg);
+		color: var(--arcade-text);
+		font-family: var(--arcade-mono);
+	}
+
+	:global(body)::before {
+		position: fixed;
+		z-index: 10;
+		inset: 0;
+		background: repeating-linear-gradient(
+			to bottom,
+			rgba(255, 255, 255, 0.035) 0,
+			rgba(255, 255, 255, 0.035) 1px,
+			transparent 1px,
+			transparent 4px
+		);
+		content: '';
+		pointer-events: none;
+	}
+
+	:global(body)::after {
+		position: fixed;
+		z-index: 10;
+		inset: 0;
+		background: radial-gradient(ellipse at center, transparent 52%, rgba(0, 0, 0, 0.48));
+		content: '';
+		pointer-events: none;
+	}
+
+	.battle-page {
+		position: relative;
+		z-index: 1;
+		width: min(1100px, calc(100% - 2rem));
+		margin: 0 auto;
+		padding: 4rem 0;
+	}
+
+	.hero {
+		margin-bottom: 2rem;
+		text-align: center;
+	}
+
+	.eyebrow {
+		color: var(--arcade-green);
+		font-size: 0.8rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	h1 {
+		margin: 0.5rem 0;
+		color: var(--arcade-purple);
+		font-size: clamp(2rem, 6vw, 4.5rem);
+		line-height: 1.35;
+		text-shadow:
+			0 0 0.15em var(--arcade-purple),
+			0 0 0.45em rgba(138, 43, 226, 0.8),
+			0 0 1em rgba(95, 237, 131, 0.35);
+		animation: neon-pulse 3s ease-in-out infinite;
+	}
+
+	.hero p:last-child {
+		color: var(--arcade-muted);
+		font-family: system-ui, sans-serif;
+	}
+
+	.battle-form {
+		display: grid;
+		grid-template-columns: 1fr auto 1fr auto;
+		align-items: end;
+		gap: 1rem;
+		padding: 1.5rem;
+		border: 1px solid var(--arcade-border);
+		border-radius: 1rem;
+		background: var(--arcade-panel);
+		box-shadow:
+			0 0 1.5rem rgba(138, 43, 226, 0.12),
+			inset 0 0 1.5rem rgba(95, 237, 131, 0.035);
+	}
+
+	.player-input {
+		display: grid;
+		gap: 0.5rem;
+		animation: float-in 0.6s ease-out both;
+	}
+
+	.player-input:nth-child(3) {
+		animation-delay: 0.12s;
+	}
+
+	label {
+		color: var(--arcade-muted);
+		font-size: 0.85rem;
+		font-weight: 700;
+	}
+
+	input,
+	button {
+		min-height: 3rem;
+		border-radius: 0.5rem;
+		font: inherit;
+	}
+
+	input {
+		width: 100%;
+		border: 1px solid rgba(109, 140, 255, 0.6);
+		padding: 0.75rem 1rem;
+		background: rgba(8, 12, 24, 0.9);
+		color: var(--arcade-text);
+		box-shadow: inset 0 0 0.75rem rgba(109, 140, 255, 0.08);
+	}
+
+	.input-error {
+		min-height: 1rem;
+		margin: 0;
+		color: transparent;
+		font-family: system-ui, sans-serif;
+		font-size: 0.75rem;
+		line-height: 1.35;
+	}
+
+	.player-input.has-error input {
+		border-color: #ff3d81;
+		box-shadow:
+			0 0 0.45rem rgba(255, 61, 129, 0.8),
+			inset 0 0 0.75rem rgba(255, 61, 129, 0.14);
+	}
+
+	.player-input.has-error .input-error {
+		color: #ff8fb5;
+		text-shadow: 0 0 0.45rem rgba(255, 61, 129, 0.75);
+	}
+
+	input:focus-visible,
+	button:focus-visible {
+		outline: 3px solid var(--arcade-green);
+		outline-offset: 2px;
+	}
+
+	.results:focus-visible {
+		outline: 3px solid var(--arcade-green);
+		outline-offset: 0.35rem;
+	}
+
+	.versus {
+		padding-bottom: 0.75rem;
+		color: var(--arcade-purple);
+		font-weight: 900;
+	}
+
+	button {
+		border: 0;
+		padding: 0.75rem 1.25rem;
+		background: var(--arcade-green);
+		color: #07100a;
+		cursor: pointer;
+		font-weight: 800;
+		box-shadow: 0 0 1rem rgba(95, 237, 131, 0.35);
+		transition:
+			background-color 0.2s ease,
+			box-shadow 0.2s ease,
+			transform 0.2s ease;
+	}
+
+	button:hover {
+		background: var(--arcade-purple);
+		color: #fff;
+		box-shadow: 0 0 1.2rem rgba(138, 43, 226, 0.65);
+		transform: translateY(-2px);
+	}
+
+	.status {
+		min-height: 1.5rem;
+		margin: 1.5rem 0;
+		color: var(--arcade-muted);
+		text-align: center;
+		font-size: 0.8rem;
+	}
+
+	.status.loading {
+		color: var(--arcade-green);
+		animation: loading-shift 2s ease-in-out infinite;
+	}
+
+	.status.error {
+		padding: 0.75rem 1rem;
+		border: 1px solid rgba(255, 61, 129, 0.7);
+		border-radius: 0.5rem;
+		background: rgba(74, 10, 44, 0.65);
+		color: #ff8fb5;
+		text-shadow: 0 0 0.65rem rgba(255, 61, 129, 0.85);
+		box-shadow:
+			0 0 0.8rem rgba(255, 61, 129, 0.35),
+			inset 0 0 1rem rgba(255, 61, 129, 0.08);
+		animation: error-flash 0.35s ease-out;
+	}
+
+	:global(.comparison) {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+		align-items: center;
+		gap: 1rem;
+	}
+
+	:global(.result-versus) {
+		background: linear-gradient(120deg, var(--arcade-green), var(--arcade-purple), var(--arcade-green));
+		background-size: 220% 220%;
+		color: transparent;
+		font-size: 1.25rem;
+		font-weight: 900;
+		-webkit-background-clip: text;
+		background-clip: text;
+		text-shadow: 0 0 1rem rgba(138, 43, 226, 0.65);
+		animation: versus-shift 3s ease-in-out infinite;
+	}
+
+	:global(.player-card) {
+		position: relative;
+		overflow: hidden;
+		min-width: 0;
+		padding: 1.5rem;
+		border: 1px solid var(--arcade-border);
+		border-radius: 1rem;
+		background: var(--arcade-panel);
+		box-shadow: 0 0 1.5rem rgba(138, 43, 226, 0.12);
+	}
+
+	:global(.player-card)::before {
+		position: absolute;
+		z-index: 0;
+		top: 0;
+		left: -75%;
+		width: 45%;
+		height: 100%;
+		background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+		content: '';
+		pointer-events: none;
+		transform: skewX(-18deg);
+		animation: card-shimmer 4.5s ease-in-out infinite;
+	}
+
+	:global(.player-card > *) {
+		position: relative;
+		z-index: 1;
+	}
+
+	:global(.player-card h2) {
+		margin: 0;
+		color: var(--arcade-green);
+		overflow-wrap: anywhere;
+		font-size: 1.05rem;
+	}
+
+	:global(.summary) {
+		margin-bottom: 0.25rem;
+		color: var(--arcade-text);
+		font-family: system-ui, sans-serif;
+		font-size: 1.25rem;
+		font-weight: 700;
+	}
+
+	:global(.date-range) {
+		margin-top: 0;
+		color: var(--arcade-muted);
+		font-family: system-ui, sans-serif;
+		font-size: 0.85rem;
+	}
+
+	:global(.contribution-grid) {
+		display: flex;
+		gap: 3px;
+		margin-top: 1.5rem;
+		overflow-x: auto;
+		padding-bottom: 0.25rem;
+	}
+
+	:global(.week) {
+		display: grid;
+		flex: 0 0 10px;
+		grid-template-rows: repeat(7, 10px);
+		gap: 3px;
+	}
+
+	:global(.day) {
+		display: block;
+		width: 10px;
+		height: 10px;
+		border-radius: 2px;
+		box-shadow: 0 0 0 transparent;
+		transition:
+			transform 0.15s ease,
+			box-shadow 0.15s ease,
+			filter 0.15s ease;
+	}
+
+	:global(.day:hover),
+	:global(.day:focus-visible) {
+		position: relative;
+		z-index: 2;
+		filter: brightness(1.3);
+		transform: scale(1.45);
+		box-shadow:
+			0 0 0.35rem currentColor,
+			0 0 0.7rem currentColor;
+	}
+
+	@media (max-width: 1024px) {
+		:global(.comparison) {
+			grid-template-columns: 1fr;
+		}
+
+		:global(.result-versus) {
+			text-align: center;
+		}
+	}
+
+	@media (max-width: 760px) {
+		.battle-page {
+			padding: 2rem 0;
+		}
+
+		.battle-form {
+			grid-template-columns: 1fr;
+		}
+
+		.versus {
+			padding: 0;
+			text-align: center;
+		}
+
+		button {
+			width: 100%;
+		}
+
+		:global(.comparison) {
+			grid-template-columns: 1fr;
+		}
+
+		:global(.result-versus) {
+			text-align: center;
+		}
+	}
+
+	@keyframes neon-pulse {
+		0%,
+		100% {
+			filter: brightness(0.92);
+			transform: scale(1);
+		}
+		50% {
+			filter: brightness(1.2);
+			transform: scale(1.015);
+		}
+	}
+
+	@keyframes versus-shift {
+		0%,
+		100% {
+			background-position: 0% 50%;
+			transform: scale(1);
+		}
+		50% {
+			background-position: 100% 50%;
+			transform: scale(1.08);
+		}
+	}
+
+	@keyframes card-shimmer {
+		0%,
+		55% {
+			left: -75%;
+		}
+		100% {
+			left: 140%;
+		}
+	}
+
+	@keyframes float-in {
+		from {
+			opacity: 0;
+			transform: translateY(1rem);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@keyframes loading-shift {
+		0%,
+		100% {
+			color: var(--arcade-green);
+			text-shadow: 0 0 0.5rem rgba(95, 237, 131, 0.5);
+		}
+		50% {
+			color: var(--arcade-purple);
+			text-shadow: 0 0 0.5rem rgba(138, 43, 226, 0.6);
+		}
+	}
+
+	@keyframes error-flash {
+		0% {
+			opacity: 0.45;
+			transform: translateX(-0.35rem);
+		}
+		60% {
+			transform: translateX(0.2rem);
+		}
+		100% {
+			opacity: 1;
+			transform: translateX(0);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			scroll-behavior: auto !important;
+			transition-duration: 0.01ms !important;
+		}
+
+		:global(.result-versus),
+		:global(.player-card)::before {
+			animation: none !important;
+		}
+
+		:global(.day) {
+			transition: none !important;
+		}
+	}
+</style>
